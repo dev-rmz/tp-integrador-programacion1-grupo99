@@ -5,8 +5,8 @@ import csv
 import os
 import sys
 
-# Estructura de salida esperada por core.py
-Pais = Dict[str, Any]  # keys: nombre(str), poblacion(int), superficie(int), continente(str)
+# Estructura compatible con core.Pais
+Pais = Dict[str, Any]
 CAMPOS_REQUERIDOS = ("nombre", "poblacion", "superficie", "continente")
 
 
@@ -16,28 +16,27 @@ class CSVInvalido(Exception):
 
 def _mapear_headers(headers: List[str]) -> Dict[str, str]:
     """
-    Mapea headers del CSV a los nombres canónicos requeridos.
-    Acepta variantes como 'Población', 'superficie km2', etc.
+    Permite headers flexibles. Devuelve un mapa header_origen -> header_canonico.
     """
+    canonicos = {
+        "nombre": {"nombre", "pais", "country"},
+        "poblacion": {"poblacion", "población", "population", "hab", "habitantes"},
+        "superficie": {"superficie", "area", "área", "km2", "km^2"},
+        "continente": {"continente", "region", "región", "continent"},
+    }
     mapa: Dict[str, str] = {}
     for h in headers:
-        base = (h or "").strip().lower()
-        if base == "":
-            continue
-        if "nombre" in base:
-            mapa[h] = "nombre"
-        elif "pobl" in base:  # poblacion / población
-            mapa[h] = "poblacion"
-        elif "superf" in base:  # superficie / superficie km2
-            mapa[h] = "superficie"
-        elif "continent" in base:  # continente
-            mapa[h] = "continente"
-    faltantes = [c for c in CAMPOS_REQUERIDOS if c not in mapa.values()]
-    if faltantes:
-        raise CSVInvalido(
-            f"Faltan columnas requeridas: {', '.join(faltantes)}. "
-            f"Encontradas: {headers}"
-        )
+        h_low = h.strip().lower()
+        asignado = False
+        for canon, variantes in canonicos.items():
+            if h_low in variantes:
+                mapa[h] = canon
+                asignado = True
+                break
+        if not asignado:
+            # Mantener header original por si coincide exacto con canon
+            if h_low in canonicos:
+                mapa[h] = h_low
     return mapa
 
 
@@ -45,7 +44,7 @@ def _to_int(value: Any, campo: str, fila_nro: int) -> int:
     s = str(value).strip()
     if s == "":
         raise CSVInvalido(f"Fila {fila_nro}: campo '{campo}' vacío.")
-    # Permitir '1.234.567' o '1,234,567'
+    # Eliminar separadores de miles comunes
     s_limpio = "".join(ch for ch in s if ch.isdigit())
     if s_limpio == "":
         raise CSVInvalido(f"Fila {fila_nro}: campo '{campo}' no es numérico: {value!r}")
@@ -54,60 +53,65 @@ def _to_int(value: Any, campo: str, fila_nro: int) -> int:
 
 def cargar_paises(ruta_csv: str) -> List[Pais]:
     """
-    Lee el CSV, valida y convierte tipos.
-    Devuelve una lista de dicts con keys: nombre(str), poblacion(int), superficie(int), continente(str).
-    Puede imprimir advertencias por filas inválidas y las salta.
+    Lee el CSV, valida y convierte tipos. Tolera filas con errores (avisa por stderr).
     """
     if not os.path.exists(ruta_csv):
-        raise FileNotFoundError(f"No se encontró el archivo: {ruta_csv}")
+        raise FileNotFoundError(ruta_csv)
 
-    paises: List[Pais] = []
-    errores: List[str] = []
-
-    with open(ruta_csv, "r", encoding="utf-8-sig", newline="") as f:
+    with open(ruta_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise CSVInvalido("El CSV no tiene encabezados.")
+        mapa = _mapear_headers(reader.fieldnames)
+        faltantes = set(CAMPOS_REQUERIDOS) - set(mapa.values())
+        if faltantes:
+            raise CSVInvalido(f"Headers faltantes: {', '.join(sorted(faltantes))}")
 
-        mapa_headers = _mapear_headers(reader.fieldnames)
-
-        for idx, row in enumerate(reader, start=2):  # empieza en 2 por el header
+        out: List[Pais] = []
+        for i, row in enumerate(reader, start=2):  # datos arrancan en fila 2 (tras encabezados)
             try:
-                nombre = (row.get(next(k for k, v in mapa_headers.items() if v == "nombre"), "") or "").strip()
-                continente = (row.get(next(k for k, v in mapa_headers.items() if v == "continente"), "") or "").strip()
+                nombre = str(row.get(next(k for k, v in mapa.items() if v == 'nombre'), "")).strip()
+                continente = str(row.get(next(k for k, v in mapa.items() if v == 'continente'), "")).strip()
+                poblacion_raw = row.get(next(k for k, v in mapa.items() if v == 'poblacion'), "")
+                superficie_raw = row.get(next(k for k, v in mapa.items() if v == 'superficie'), "")
 
                 if not nombre or not continente:
-                    raise CSVInvalido(f"Fila {idx}: nombre/continente vacío.")
+                    raise CSVInvalido(f"Fila {i}: nombre/continente vacío.")
 
-                poblacion_raw = row.get(next(k for k, v in mapa_headers.items() if v == "poblacion"))
-                superficie_raw = row.get(next(k for k, v in mapa_headers.items() if v == "superficie"))
+                poblacion = _to_int(poblacion_raw, "poblacion", i)
+                superficie = _to_int(superficie_raw, "superficie", i)
 
-                poblacion = _to_int(poblacion_raw, "poblacion", idx)
-                superficie = _to_int(superficie_raw, "superficie", idx)
-
-                paises.append({
+                out.append({
                     "nombre": nombre,
                     "poblacion": poblacion,
                     "superficie": superficie,
-                    "continente": continente
+                    "continente": continente,
                 })
             except Exception as e:
-                errores.append(str(e))
-                # seguimos con la próxima fila
+                print(f"[Advertencia] {e}", file=sys.stderr)
+                continue
 
-    if errores:
-        print(f"[io_utils] Advertencias: se omitieron {len(errores)} filas inválidas.", file=sys.stderr)
-        for msg in errores[:5]:
-            print("  - " + msg, file=sys.stderr)
-        if len(errores) > 5:
-            print(f"  ... y {len(errores)-5} más.", file=sys.stderr)
-
-    return paises
+    return out
 
 
-# Alias por si en algún lado quedó otro nombre escrito
+def guardar_paises(ruta_csv: str, paises: List[Pais]) -> None:
+    tmp = ruta_csv + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(CAMPOS_REQUERIDOS))
+        writer.writeheader()
+        for p in paises:
+            writer.writerow({
+                "nombre": p["nombre"],
+                "poblacion": int(p["poblacion"]),
+                "superficie": int(p["superficie"]),
+                "continente": p["continente"],
+            })
+    os.replace(tmp, ruta_csv)
+
+
+# Alias por si quedó otro nombre escrito en algún lado
 def carga_paises(ruta_csv: str) -> List[Pais]:
     return cargar_paises(ruta_csv)
 
 
-__all__ = ["cargar_paises", "carga_paises", "CSVInvalido"]
+__all__ = ["cargar_paises", "carga_paises", "guardar_paises", "CSVInvalido"]

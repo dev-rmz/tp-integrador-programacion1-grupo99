@@ -1,120 +1,156 @@
 # src/core.py
 from __future__ import annotations
 from typing import List, Dict, Optional, TypedDict
+from unicodedata import normalize as _u_norm, combining
 
-# Tipado más estricto 
+# ---------------- Tipos ----------------
 class Pais(TypedDict):
     nombre: str
     poblacion: int
     superficie: int
     continente: str
 
-# ---------- BÚSQUEDAS ----------
-def buscar_por_nombre(paises: List[Pais], query: str, exacto: bool = False) -> List[Pais]:
+# ---------------- Normalización (sin tildes, case-insensitive) ----------------
+def _norm(s: str) -> str:
     """
-    Busca países por nombre.
-    - exacto=True: igualdad exacta (ignora mayúsculas/minúsculas).
-    - exacto=False: coincidencia parcial (subcadena).
-    Complejidad: O(n)
+    Normaliza texto para comparar sin tildes y en minúsculas.
     """
-    q = (query or "").strip().lower()
-    if not q:
-        return []
-    if exacto:
-        return [p for p in paises if p["nombre"].lower() == q]
-    return [p for p in paises if q in p["nombre"].lower()]
+    s = _u_norm("NFKD", s)
+    s = "".join(ch for ch in s if not combining(ch))
+    return s.lower().strip()
 
-# ---------- FILTROS ----------
+
+# ---------------- Validaciones básicas ----------------
+def _validar_no_vacio(s: str, campo: str) -> str:
+    if not s or not s.strip():
+        raise ValueError(f"{campo} no puede estar vacío.")
+    return s.strip()
+
+
+def _validar_entero_positivo(n: int, campo: str) -> int:
+    try:
+        n = int(n)
+    except Exception:
+        raise ValueError(f"{campo} debe ser un entero.")
+    if n < 0:
+        raise ValueError(f"{campo} debe ser un entero positivo.")
+    return n
+
+
+# ---------------- Operaciones ----------------
+def agregar_pais(paises: List[Pais], nombre: str, poblacion: int, superficie: int, continente: str) -> Pais:
+    nombre = _validar_no_vacio(nombre, "Nombre")
+    continente = _validar_no_vacio(continente, "Continente")
+    poblacion = _validar_entero_positivo(poblacion, "Población")
+    superficie = _validar_entero_positivo(superficie, "Superficie")
+
+    # Si ya existe, actualizamos (criterio simple).
+    target = _norm(nombre)
+    for p in paises:
+        if _norm(p["nombre"]) == target:
+            p["poblacion"] = poblacion
+            p["superficie"] = superficie
+            p["continente"] = continente
+            return p
+    nuevo = {"nombre": nombre, "poblacion": poblacion, "superficie": superficie, "continente": continente}
+    paises.append(nuevo)
+    return nuevo
+
+
+def actualizar_pais(
+    paises: List[Pais],
+    nombre: str,
+    nueva_poblacion: Optional[int] = None,
+    nueva_superficie: Optional[int] = None,
+) -> Optional[Pais]:
+    """
+    Actualiza población y/o superficie del país cuyo nombre matchee normalizado.
+    Devuelve el país actualizado o None si no existe.
+    """
+    nombre = _validar_no_vacio(nombre, "Nombre")
+    if nueva_poblacion is None and nueva_superficie is None:
+        raise ValueError("Debe indicar al menos un valor a actualizar (población/superficie).")
+
+    target = _norm(nombre)
+    for p in paises:
+        if _norm(p["nombre"]) == target:
+            if nueva_poblacion is not None:
+                p["poblacion"] = _validar_entero_positivo(nueva_poblacion, "Población")
+            if nueva_superficie is not None:
+                p["superficie"] = _validar_entero_positivo(nueva_superficie, "Superficie")
+            return p
+    return None
+
+
+def buscar_por_nombre(paises: List[Pais], patron: str, exacto: bool = False) -> List[Pais]:
+    patron_n = _norm(_validar_no_vacio(patron, "Patrón de búsqueda"))
+    if exacto:
+        return [p for p in paises if _norm(p["nombre"]) == patron_n]
+    return [p for p in paises if patron_n in _norm(p["nombre"])]
+
+
 def filtrar_por_continente(paises: List[Pais], continente: str) -> List[Pais]:
-    """
-    Filtra por continente (case-insensitive).
-    Complejidad: O(n)
-    """
-    c = (continente or "").strip().lower()
-    if not c:
-        return []
-    return [p for p in paises if p["continente"].lower() == c]
+    c = _norm(_validar_no_vacio(continente, "Continente"))
+    return [p for p in paises if _norm(p["continente"]) == c]
+
 
 def filtrar_por_rango_poblacion(
     paises: List[Pais],
     min_p: Optional[int] = None,
     max_p: Optional[int] = None,
 ) -> List[Pais]:
-    """
-    Filtra por rango de población. Si min_p o max_p son None, ese extremo no se aplica.
-    Complejidad: O(n)
-    """
     return [
         p for p in paises
         if (min_p is None or p["poblacion"] >= min_p)
         and (max_p is None or p["poblacion"] <= max_p)
     ]
 
+
 def filtrar_por_rango_superficie(
     paises: List[Pais],
     min_s: Optional[int] = None,
     max_s: Optional[int] = None,
 ) -> List[Pais]:
-    """
-    Filtra por rango de superficie. Si min_s o max_s son None, ese extremo no se aplica.
-    Complejidad: O(n)
-    """
     return [
         p for p in paises
         if (min_s is None or p["superficie"] >= min_s)
         and (max_s is None or p["superficie"] <= max_s)
     ]
 
-# ---------- ORDEN ----------
-def ordenar(paises: List[Pais], clave: str, asc: bool = True) -> List[Pais]:
-    """
-    Ordena por 'nombre' | 'poblacion' | 'superficie'.
-    Usa Timsort (sorted), estable: O(n log n)
-    """
-    clave = (clave or "").strip().lower()
+
+def ordenar(paises: List[Pais], clave: str, descendente: bool = False) -> List[Pais]:
+    clave = clave.lower().strip()
     if clave not in {"nombre", "poblacion", "superficie"}:
-        raise ValueError("Clave de orden inválida. Use: nombre | poblacion | superficie")
-    return sorted(paises, key=lambda p: p[clave], reverse=not asc)
+        raise ValueError("Clave inválida. Use: nombre | poblacion | superficie")
+    if clave == "nombre":
+        return sorted(paises, key=lambda p: _norm(p["nombre"]), reverse=descendente)
+    return sorted(paises, key=lambda p: p[clave], reverse=descendente)
 
-# ---------- ESTADÍSTICAS ----------
+
 def estadisticas(paises: List[Pais]) -> Dict[str, object]:
-    """
-    Calcula estadísticas básicas del conjunto.
-    Devuelve un dict con:
-      - mayor_poblacion: dict (país) o None
-      - menor_poblacion: dict (país) o None
-      - prom_poblacion: float o None
-      - prom_superficie: float o None
-      - cant_por_continente: dict[str, int]
-    Complejidad: O(n)
-    """
-    if not paises:
+    n = len(paises)
+    if n == 0:
         return {
-            "mayor_poblacion": None,
-            "menor_poblacion": None,
-            "prom_poblacion": None,
-            "prom_superficie": None,
-            "cant_por_continente": {}
+            "n": 0,
+            "mayor_poblacion": {"nombre": "", "poblacion": 0},
+            "menor_poblacion": {"nombre": "", "poblacion": 0},
+            "prom_poblacion": 0.0,
+            "prom_superficie": 0.0,
+            "cant_por_continente": {},
         }
-
-    # mayor/menor por población
     mayor = max(paises, key=lambda p: p["poblacion"])
     menor = min(paises, key=lambda p: p["poblacion"])
-
-    n = len(paises)
     prom_p = sum(p["poblacion"] for p in paises) / n
     prom_s = sum(p["superficie"] for p in paises) / n
-
-    # conteo por continente
-    conteo: Dict[str, int] = {}
+    por_cont = {}
     for p in paises:
-        cont = p["continente"]
-        conteo[cont] = conteo.get(cont, 0) + 1
+        por_cont[p["continente"]] = por_cont.get(p["continente"], 0) + 1
 
     return {
-        "mayor_poblacion": mayor,
-            "menor_poblacion": menor,
-            "prom_poblacion": prom_p,
-            "prom_superficie": prom_s,
-            "cant_por_continente": conteo
+        "n": n,
+        "mayor_poblacion": {"nombre": mayor["nombre"], "poblacion": mayor["poblacion"]},
+        "menor_poblacion": {"nombre": menor["nombre"], "poblacion": menor["poblacion"]},
+        "prom_poblacion": prom_p,
+        "prom_superficie": prom_s,
+        "cant_por_continente": por_cont,
     }
